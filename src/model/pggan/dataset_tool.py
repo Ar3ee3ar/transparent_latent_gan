@@ -15,6 +15,7 @@ import traceback
 import numpy as np
 import tensorflow as tf
 import PIL.Image
+from sklearn.model_selection import train_test_split
 
 import tfutil
 import dataset
@@ -33,7 +34,7 @@ class TFRecordExporter:
         self.tfr_prefix         = os.path.join(self.tfrecord_dir, os.path.basename(self.tfrecord_dir))
         self.expected_images    = expected_images
         self.cur_images         = 0
-        self.shape              = None
+        self.shape              = (3,64,64)
         self.resolution_log2    = None
         self.tfr_writers        = []
         self.print_progress     = print_progress
@@ -59,6 +60,12 @@ class TFRecordExporter:
         np.random.RandomState(123).shuffle(order)
         return order
 
+    def resize_image(self,image_array):
+        image = PIL.Image.fromarray(image_array)
+        image = image.resize((self.shape[1],self.shape[2]))
+        face_array = np.asarray(image)
+        return face_array
+
     def add_image(self, img):
         if self.print_progress and self.cur_images % self.progress_interval == 0:
             print('%d / %d\r' % (self.cur_images, self.expected_images), end='', flush=True)
@@ -68,10 +75,10 @@ class TFRecordExporter:
             assert self.shape[0] in [1, 3]
             assert self.shape[1] == self.shape[2]
             assert self.shape[1] == 2**self.resolution_log2
-            tfr_opt = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.NONE)
+            tfr_opt = tf.io.TFRecordOptions(compression_type = '')
             for lod in range(self.resolution_log2 - 1):
                 tfr_file = self.tfr_prefix + '-r%02d.tfrecords' % (self.resolution_log2 - lod)
-                self.tfr_writers.append(tf.python_io.TFRecordWriter(tfr_file, tfr_opt))
+                self.tfr_writers.append(tf.io.TFRecordWriter(tfr_file, tfr_opt))
         assert img.shape == self.shape
         for lod, tfr_writer in enumerate(self.tfr_writers):
             if lod:
@@ -594,8 +601,14 @@ def create_celebahq(tfrecord_dir, celeba_dir, delta_dir, num_threads=4, num_task
                 tfr.add_image(img)
 
 #----------------------------------------------------------------------------
+#TODO: add train test split from sklearn
+def Split_train_test(img_array):
+    img_train, img_test = train_test_split(img_array, test_size=0.33, random_state=1000)
+    return img_train, img_test
 
-def create_from_images(tfrecord_dir, image_dir, shuffle):
+def create_from_images(tfrecord_dir, image_dir,TrainTest, shuffle):
+    file_name_count = []
+    file_name = ['-train','-test']
     print('Loading images from "%s"' % image_dir)
     image_filenames = sorted(glob.glob(os.path.join(image_dir, '*')))
     if len(image_filenames) == 0:
@@ -610,16 +623,29 @@ def create_from_images(tfrecord_dir, image_dir, shuffle):
         error('Input image resolution must be a power-of-two')
     if channels not in [1, 3]:
         error('Input images must be stored as RGB or grayscale')
-    
-    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
-        order = tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
-        for idx in range(order.size):
-            img = np.asarray(PIL.Image.open(image_filenames[order[idx]]))
-            if channels == 1:
-                img = img[np.newaxis, :, :] # HW => CHW
-            else:
-                img = img.transpose(2, 0, 1) # HWC => CHW
-            tfr.add_image(img)
+
+    if(TrainTest):
+        img_train, img_test = Split_train_test(image_filenames)
+        file_name_count.append(img_train)
+        file_name_count.append(img_test)
+    else:
+        file_name_count.append(image_filenames)
+
+    for i in range(len(file_name_count)):
+        if(len(file_name_count)>1):
+            tfrecord_dir += file_name[i]
+
+        with TFRecordExporter(tfrecord_dir, 100) as tfr:
+            order = tfr.choose_shuffled_order() if shuffle else np.arange(100)
+            for idx in range(order.size):
+                img = np.asarray(PIL.Image.open(file_name_count[i][order[idx]]))
+                if(img.shape[1] != tfr.shape[1]):
+                    img = tfr.resize_image(img)
+                if channels == 1:
+                    img = img[np.newaxis, :, :] # HW => CHW
+                else:
+                    img = img.transpose(2, 0, 1) # HWC => CHW
+                tfr.add_image(img)
 
 #----------------------------------------------------------------------------
 
@@ -719,6 +745,7 @@ def execute_cmdline(argv):
                                             'create_from_images datasets/mydataset myimagedir')
     p.add_argument(     'tfrecord_dir',     help='New dataset directory to be created')
     p.add_argument(     'image_dir',        help='Directory containing the images')
+    p.add_argument(     '--TrainTest',        help='Split data to train test (default: False)',type=bool, default=False)
     p.add_argument(     '--shuffle',        help='Randomize image order (default: 1)', type=int, default=1)
 
     p = add_command(    'create_from_hdf5', 'Create dataset from legacy HDF5 archive.',
